@@ -4,7 +4,19 @@
 {-# LANGUAGE TupleSections #-}
 {-# LANGUAGE TypeOperators #-}
 
-module Page where
+module Page
+    ( Page (..)
+    , Dir (..)
+    , mkPage
+
+      -- * StateT monadic interface to the page
+    , getPageS
+    , setColumnsS
+    , setRowsS
+    , jumpS
+    , dimenstionsS
+    )
+where
 
 import Control.Monad.State
     ( MonadState (..)
@@ -15,7 +27,6 @@ import Control.Monad.State
 import Data.Bifunctor (Bifunctor (..), first)
 import Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.List.NonEmpty as NE
-import Debug.Trace (traceShow)
 
 -- infinite effectful stream of `a` values
 data Generator m a = Elem a (Generator m a) | Effect (m (Generator m a))
@@ -25,10 +36,6 @@ data Dir = Up | Down
 next :: (Enum b) => Dir -> b -> b
 next Up = pred
 next Down = succ
-
-move :: (Num b) => Dir -> b -> b -> b
-move Up x n = n - x
-move Down x n = x + n
 
 generate
     :: (Monad m, Enum b)
@@ -44,6 +51,7 @@ generate pick from dir = go from
         line <- pick i
         pure $ Elem (i, line) $ go $ next dir i
 
+-- expand each element of the generator into a non-empty list of elements
 each
     :: forall m a c
      . (Monad m)
@@ -62,10 +70,6 @@ each f (Effect m) = Effect $ each f <$> m
 dropUntil :: (Monad m) => (a -> Bool) -> Generator m a -> Generator m a
 dropUntil p e@(Elem x g) = if p x then e else dropUntil p g
 dropUntil p (Effect m) = Effect $ dropUntil p <$> m
-
-showG :: (Show a, Functor m) => Generator m a -> Generator m a
-showG (Elem x g) = traceShow x $ Elem x $ showG g
-showG (Effect m) = Effect $ showG <$> m
 
 -- extract a finite number of values from the generator and the next one
 collect
@@ -146,11 +150,16 @@ scroll dir (ls, (x, _)) =
 mkCursor :: Border -> ([(WLine, a)], (WLine, a)) -> Cursor a
 mkCursor b0 (ls, (x, _)) = Cursor (snd <$> ls) b0 (fst $ last ls, x)
 
+--------------------------------------------------------------------------------
+--- API ------------------------------------------------------------------------
+--------------------------------------------------------------------------------
+
 data Page m a = Page
     { _page :: [a]
     , _jump :: Dir -> m (Page m a)
     , _setCols :: Int -> m (Page m a)
     , _setRows :: Int -> m (Page m a)
+    , _dimenstions :: (Int, Int)
     }
 
 mkPage
@@ -173,25 +182,25 @@ mkPage wrap pick rows cols = do
     update = getLines pick . wrap
     go :: Cursor a -> Int -> Int -> Page m a
     go cursor rows' cols' =
-        traceShow cursor
-            $ Page
-                { _page = _cursor cursor
-                , _jump = \dir -> do
-                    f <- case dir of
-                        Down ->
-                            scroll Down
-                                <$> update cols' (snd $ _cursorBottom cursor) Down rows'
-                        Up ->
-                            scroll Up
-                                <$> update cols' (fst $ _cursorTop cursor) Up rows'
-                    pure $ go (f cursor) rows' cols'
-                , _setCols = \n -> do
-                    as <- update n (snd $ _cursorTop cursor) Down rows'
-                    pure $ go (mkCursor (_cursorTop cursor) as) rows' n
-                , _setRows = \n -> do
-                    as <- update cols' (snd $ _cursorTop cursor) Down n
-                    pure $ go (mkCursor (_cursorTop cursor) as) n cols'
-                }
+        Page
+            { _page = _cursor cursor
+            , _jump = \dir -> do
+                f <- case dir of
+                    Down ->
+                        scroll Down
+                            <$> update cols' (snd $ _cursorBottom cursor) Down rows'
+                    Up ->
+                        scroll Up
+                            <$> update cols' (fst $ _cursorTop cursor) Up rows'
+                pure $ go (f cursor) rows' cols'
+            , _setCols = \n -> do
+                as <- update n (snd $ _cursorTop cursor) Down rows'
+                pure $ go (mkCursor (_cursorTop cursor) as) rows' n
+            , _setRows = \n -> do
+                as <- update cols' (snd $ _cursorTop cursor) Down n
+                pure $ go (mkCursor (_cursorTop cursor) as) n cols'
+            , _dimenstions = (rows', cols')
+            }
 
 --------------------------------------------------------------------------------
 -- Monadic interface to the page -----------------------------------------------
@@ -199,8 +208,8 @@ mkPage wrap pick rows cols = do
 
 type n ~> m = forall a. n a -> m a
 
-getPage :: (MonadState (Page n a) m) => m [a]
-getPage = gets _page
+getPageS :: (MonadState (Page n a) m) => m [a]
+getPageS = gets _page
 
 modifyM :: (MonadState s m) => (s -> m s) -> m ()
 modifyM f = get >>= f >>= put
@@ -214,36 +223,14 @@ setRows t n = modifyM $ \p -> t $ _setRows p n
 jump :: (MonadState (Page n a) m) => (n ~> m) -> Dir -> m ()
 jump t d = modifyM $ \p -> t $ _jump p d
 
-withPage :: Page m a -> StateT (Page m a) m b -> m (b, Page m a)
-withPage p f = runStateT f p
+setColumnsS :: (Monad m) => Int -> StateT (Page m a) m ()
+setColumnsS = setColumns lift
 
-unfoldPage :: (Functor m) => Page m a -> StateT (Page m a) m b -> m b
-unfoldPage f = fmap fst . withPage f
+setRowsS :: (Monad m) => Int -> StateT (Page m a) m ()
+setRowsS = setRows lift
 
-columnsL :: (Monad m) => Int -> StateT (Page m a) m ()
-columnsL = setColumns lift
+jumpS :: (Monad m) => Dir -> StateT (Page m a) m ()
+jumpS = jump lift
 
-rowsL :: (Monad m) => Int -> StateT (Page m a) m ()
-rowsL = setRows lift
-
-jumpL :: (Monad m) => Dir -> StateT (Page m a) m ()
-jumpL = jump lift
-
---------------------------------------------------------------------------------
--- Example usage ---------------------------------------------------------------
---------------------------------------------------------------------------------
-
-testPage :: (Monad m) => m (Page m String)
-testPage = mkPage splitter (\x -> pure $ concat $ replicate x (show x)) 3 3
-
-splitter :: Int -> String -> NonEmpty String
-splitter n x = case splitAt n x of
-    (a, b) -> case b of
-        [] -> a :| []
-        _ -> a `NE.cons` splitter n b
-
-unfoldTestPage :: StateT (Page IO String) IO [String] -> IO ()
-unfoldTestPage f = do
-    p <- testPage
-    r <- unfoldPage p f
-    putStrLn $ unlines r
+dimenstionsS :: (Monad m) => StateT (Page m a) m (Int, Int)
+dimenstionsS = gets _dimenstions

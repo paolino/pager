@@ -1,17 +1,27 @@
-module Wrap where
+module Wrap (wrap) where
 
-import Control.Monad.Fix (fix)
-import Data.List
+import Data.List (inits, tails)
 import Data.List.NonEmpty (NonEmpty (..), cons)
 import Data.Maybe (catMaybes)
 
--- wrap :: Int -> String -> [String]
-wrap :: (a -> Bool) -> Int -> [a] -> NonEmpty [a]
+-- | Wrap a list of items to a given line width
+wrap
+    :: (a -> Bool)
+    -- ^ valid break points
+    -> Int
+    -- ^ line width
+    -> [a]
+    -- ^ input
+    -> NonEmpty [a]
+    -- ^ wrapped output
 wrap f n xs =
     let
         breaks = zip (inits xs) $ tails xs
         breaksAtSpace = filter (canSplit f . snd . snd) $ zip [0 ..] breaks
-        withlast = catMaybes $ zipWith (cross n) breaksAtSpace $ tail breaksAtSpace
+        withlast =
+            catMaybes
+                $ zipWith (cross n) breaksAtSpace
+                $ drop 1 breaksAtSpace
      in
         case headMaybe withlast of
             Just (ys, zs) -> ys `cons` wrap f n (dropWhile f zs)
@@ -29,22 +39,3 @@ cross n (x, xs) (y, _ys)
 headMaybe :: [a] -> Maybe a
 headMaybe [] = Nothing
 headMaybe (x : _) = Just x
-
-data Wraps a = Wraps
-    { prev :: Maybe (Wraps a)
-    , current :: a
-    , next :: Maybe (Wraps a)
-    }
-    deriving (Show)
-
-mkWraps :: (a -> Bool) -> Int -> [a] -> Wraps [a]
-mkWraps f n xs = go Nothing (wrap f n xs)
-  where
-    go past (ys :| yss) = fix $ \w ->
-        Wraps
-            { prev = past
-            , current = ys
-            , next = case yss of
-                z : zs -> Just $ go (Just w) (z :| zs)
-                [] -> Nothing
-            }
