@@ -28,10 +28,10 @@ newtype Line = Line Int
 type Content = Map Line (IO String)
 
 -- | Get the line at the given line number
-getLineN :: Content -> Line -> IO String
+getLineN :: Content -> Line -> IO (Maybe String)
 getLineN m n = case Map.lookup n m of
-    Nothing -> pure ""
-    Just pos -> pos
+    Nothing -> pure Nothing
+    Just pos -> Just <$> pos
 
 -- return the action to read the line at the current handle position
 getContentLine :: Handle -> IO (IO String)

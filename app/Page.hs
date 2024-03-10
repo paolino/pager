@@ -27,74 +27,104 @@ import Control.Monad.State
 import Data.Bifunctor (Bifunctor (..), first)
 import Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.List.NonEmpty as NE
+import Debug.Trace (traceShow)
 import Generator (Dir (..), collect, dropUntil, each, generate)
 
 --------------------------------------------------------------------------------
 -- Cursor ----------------------------------------------------------------------
 --------------------------------------------------------------------------------
 
-type WLine = (Int, Int)
+data Border b = End b | Border b b
+    deriving (Show)
 
-type Border = (WLine, WLine)
+swapBorder :: Border a -> Border a
+swapBorder (End x) = End x
+swapBorder (Border x y) = Border y x
 
-data Cursor a = Cursor
+data Cursor a b = Cursor
     { _cursor :: [a]
-    , _cursorTop :: Border
-    , _cursorBottom :: Border
+    , _cursorTop :: Border b
+    , _cursorBottom :: Border b
     }
     deriving (Show)
 
-scrollUp :: [a] -> Border -> Cursor a -> Cursor a
-scrollUp ls x (Cursor _ t _) = Cursor ls x t
+scrollUp :: [a] -> Border b -> Cursor a b -> Cursor a b
+scrollUp ls x (Cursor _ t _) = Cursor ls x $ swapBorder t
 
-scrollDown :: [a] -> Border -> Cursor a -> Cursor a
-scrollDown ls x (Cursor _ _ b) = Cursor ls b x
+scrollDown :: [a] -> Border b -> Cursor a b -> Cursor a b
+scrollDown ls x (Cursor _ _ b) = Cursor ls (swapBorder b) x
+
+data PageData a b = PageData
+    { _wraps :: [a]
+    , _lastIndex :: b
+    , _nextIndex :: Maybe b
+    }
+
+scroll :: Dir -> PageData a b -> Cursor a b -> Cursor a b
+scroll dir (PageData xs l mn) = scrolling xs'
+    $ case mn of
+        Just x -> Border l x
+        Nothing -> End l
+  where
+    scrolling = case dir of
+        Up -> scrollUp
+        Down -> scrollDown
+    xs' = verse xs
+    verse = case dir of
+        Up -> reverse
+        Down -> id
+
+startCursor :: Border b -> PageData a b -> Cursor a b
+startCursor b0 (PageData xs l mn) = Cursor xs b0
+    $ case mn of
+        Just x -> Border l x
+        Nothing -> End l
+
+endCursor :: Border b -> PageData a b -> Cursor a b
+endCursor b0 (PageData xs l mn) = flip (Cursor (reverse xs)) b0
+    $ case mn of
+        Just x -> Border l x
+        Nothing -> End l
+
+fromTop :: Cursor a b -> b
+fromTop (Cursor _ (End x) _) = x
+fromTop (Cursor _ (Border x _) _) = x
+
+--------------------------------------------------------------------------------
+--- API ------------------------------------------------------------------------
+--------------------------------------------------------------------------------
+
+type Wrap = (Int, Int)
 
 getLines
     :: (Monad m, Show a)
-    => (Int -> m a)
+    => (Int -> m (Maybe a))
     -- ^ Get a line by number
     -> (a -> NonEmpty a)
     -- ^ How to wrap lines
-    -> WLine
+    -> Wrap
     -- ^ Starting line number
     -> Dir
     -- ^ Direction to move
     -> Int
     -- ^ How many lines to collect
-    -> m ([(WLine, a)], (WLine, a))
+    -> m (PageData a Wrap)
 getLines pick wrap (l, l') dir count =
-    collect count
+    fmap mkPageData
+        $ collect count
         $ dropUntil (\(p, _) -> p `ord` (l, l'))
         $ each (\(i, a) -> verse $ first (i,) <$> NE.zip (0 :| [1 ..]) (wrap a))
-        -- \$ showG
         $ generate pick l dir
   where
+    mkPageData (xs, mn) = PageData (snd <$> xs) l $ fst <$> mn
+      where
+        l = fst $ last xs
     ord = case dir of
         Up -> (<=)
         Down -> (>=)
     verse = case dir of
         Up -> NE.reverse
         Down -> id
-
-scroll :: Dir -> ([(WLine, a)], (WLine, b)) -> Cursor a -> Cursor a
-scroll dir (ls, (x, _)) =
-    case dir of
-        Up -> scrollUp als (x, l)
-        Down -> scrollDown als (l, x)
-  where
-    (l, _) = last ls
-    als = verse $ snd <$> ls
-    verse = case dir of
-        Up -> reverse
-        Down -> id
-
-mkCursor :: Border -> ([(WLine, a)], (WLine, a)) -> Cursor a
-mkCursor b0 (ls, (x, _)) = Cursor (snd <$> ls) b0 (fst $ last ls, x)
-
---------------------------------------------------------------------------------
---- API ------------------------------------------------------------------------
---------------------------------------------------------------------------------
 
 data Page m a = Page
     { _page :: [a]
@@ -109,7 +139,7 @@ mkPage
      . (Monad m, Show a)
     => (Int -> a -> NonEmpty a)
     -- ^ How to wrap lines
-    -> (Int -> m a)
+    -> (Int -> m (Maybe a))
     -- ^ Get a line by number
     -> Int
     -- ^ How many rows to display at the beginning
@@ -117,30 +147,40 @@ mkPage
     -- ^ How many columns to display at the beginning
     -> m (Page m a)
 mkPage wrap pick rows cols = do
-    f <- getLines pick (wrap cols) (0, 0) Down rows
-    let c0 = mkCursor ((-1, 0), (0, 0)) f
-    pure $ go c0 rows cols
+    f <- update cols (0, 0) Down rows
+    pure $ go (startCursor (End (0, 0)) f) rows cols
   where
+    update :: Int -> Wrap -> Dir -> Int -> m (PageData a Wrap)
     update = getLines pick . wrap
-    go :: Cursor a -> Int -> Int -> Page m a
+    refresh rows' cols' cursor = do
+        as <- update cols' (fromTop cursor) Down rows'
+        pure $ go (startCursor (_cursorTop cursor) as) rows' cols'
+
+    go :: Cursor a Wrap -> Int -> Int -> Page m a
     go cursor rows' cols' =
         Page
             { _page = _cursor cursor
             , _jump = \dir -> do
                 f <- case dir of
                     Down ->
-                        scroll Down
-                            <$> update cols' (snd $ _cursorBottom cursor) Down rows'
+                        case _cursorBottom cursor of
+                            End p -> do
+                                as <- update cols' p Up (rows' - 1)
+                                pure $ const $ endCursor (End p) as
+                            Border _ n ->
+                                scroll Down
+                                    <$> update cols' n Down rows'
                     Up ->
-                        scroll Up
-                            <$> update cols' (fst $ _cursorTop cursor) Up rows'
+                        case _cursorTop cursor of
+                            End p -> do
+                                as <- update cols' p Down rows'
+                                pure $ const $ startCursor (End p) as
+                            Border _ n ->
+                                scroll Up
+                                    <$> update cols' n Up rows'
                 pure $ go (f cursor) rows' cols'
-            , _setCols = \n -> do
-                as <- update n (snd $ _cursorTop cursor) Down rows'
-                pure $ go (mkCursor (_cursorTop cursor) as) rows' n
-            , _setRows = \n -> do
-                as <- update cols' (snd $ _cursorTop cursor) Down n
-                pure $ go (mkCursor (_cursorTop cursor) as) n cols'
+            , _setCols = \n -> refresh rows' n cursor
+            , _setRows = \n -> refresh n cols' cursor
             , _dimenstions = (rows', cols')
             }
 

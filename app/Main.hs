@@ -16,6 +16,7 @@ import Graphics.Vty
     , defaultConfig
     , nextEvent
     , picForImage
+    , resizeHeight
     , shutdown
     , string
     , update
@@ -46,7 +47,10 @@ loop :: Vty -> BarHeight -> Page IO String -> IO ()
 loop vty (BarHeight barHeight) p = flip evalStateT p $ fix $ \go -> do
     text <- getPageS
     dims <- dimenstionsS
-    liftIO $ update vty $ picForImage $ renderPage text <-> renderBar dims
+    liftIO
+        $ update vty
+        $ picForImage
+        $ renderPage (fst dims - barHeight) text <-> renderBar dims
     e <- liftIO $ nextEvent vty
     case eventToAction e of
         Nothing -> go
@@ -68,8 +72,8 @@ renderBar (h, w) = r <|> c
         string (defAttr `withBackColor` yellow `withForeColor` black)
             $ "cols " <> show w
 
-renderPage :: [String] -> Image
-renderPage = vertCat . fmap (string defAttr)
+renderPage :: Int -> [String] -> Image
+renderPage n = resizeHeight n . vertCat . fmap (string defAttr)
 
 main :: IO ()
 main = do
